@@ -49,59 +49,78 @@ section() { echo -e "\n${CYAN}━━━ $* ━━━━━━━━━━━━�
 install_jq() {
   warn "jq not found. Attempting auto-install..."
 
-  if command -v apt-get &>/dev/null; then
-    sudo apt-get update -y -qq && sudo apt-get install -y -qq jq \
-      && ok "jq installed via apt-get" && return
-  fi
-
-  if command -v yum &>/dev/null; then
-    sudo yum install -y -q jq \
-      && ok "jq installed via yum" && return
-  fi
-
-  if command -v dnf &>/dev/null; then
-    sudo dnf install -y -q jq \
-      && ok "jq installed via dnf" && return
-  fi
-
-  if command -v brew &>/dev/null; then
-    brew install jq \
-      && ok "jq installed via brew" && return
-  fi
-
-  # Fallback: download static binary directly
-  warn "No package manager found. Downloading jq static binary..."
-  local jq_bin="/usr/local/bin/jq"
   local arch
   arch=$(uname -m)
   local jq_url
 
   case "$arch" in
-    x86_64)  jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64" ;;
-    aarch64) jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64" ;;
-    *)       die "Unsupported architecture: ${arch}. Please install jq manually: https://jqlang.github.io/jq/download/" ;;
+    x86_64)          jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64" ;;
+    aarch64|arm64)   jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64" ;;
+    *)               die "Unsupported architecture: ${arch}. Install jq manually: https://jqlang.github.io/jq/download/" ;;
   esac
 
-  if command -v curl &>/dev/null; then
-    sudo curl -fsSL "$jq_url" -o "$jq_bin" && sudo chmod +x "$jq_bin" \
-      && ok "jq downloaded to ${jq_bin}" && return
-  elif command -v wget &>/dev/null; then
-    sudo wget -q "$jq_url" -O "$jq_bin" && sudo chmod +x "$jq_bin" \
-      && ok "jq downloaded to ${jq_bin}" && return
+  # Try package managers WITHOUT sudo first (root env or sudo-less)
+  if command -v apt-get &>/dev/null; then
+    apt-get update -y -qq 2>/dev/null && apt-get install -y -qq jq 2>/dev/null \
+      && ok "jq installed via apt-get" && return
   fi
 
-  die "Could not install jq automatically. Please install it manually:\n  https://jqlang.github.io/jq/download/"
+  if command -v yum &>/dev/null; then
+    yum install -y -q jq 2>/dev/null \
+      && ok "jq installed via yum" && return
+  fi
+
+  if command -v dnf &>/dev/null; then
+    dnf install -y -q jq 2>/dev/null \
+      && ok "jq installed via dnf" && return
+  fi
+
+  if command -v brew &>/dev/null; then
+    brew install jq 2>/dev/null \
+      && ok "jq installed via brew" && return
+  fi
+
+  # Download static binary to a user-writable location (no sudo needed)
+  warn "Downloading jq static binary (no sudo required)..."
+
+  # Pick first writable bin dir, or fall back to ~/bin
+  local jq_bin=""
+  local try_dirs=("${HOME}/bin" "${HOME}/.local/bin" "/tmp")
+  for d in "${try_dirs[@]}"; do
+    mkdir -p "$d" 2>/dev/null || continue
+    if touch "${d}/.jq_test" 2>/dev/null; then
+      rm -f "${d}/.jq_test"
+      jq_bin="${d}/jq"
+      break
+    fi
+  done
+
+  [[ -z "$jq_bin" ]] && die "Cannot find a writable directory for jq. Install manually: https://jqlang.github.io/jq/download/"
+
+  if command -v curl &>/dev/null; then
+    curl -fsSL "$jq_url" -o "$jq_bin" && chmod +x "$jq_bin" \
+      && ok "jq downloaded to ${jq_bin}" \
+      && export PATH="$(dirname "$jq_bin"):${PATH}" && return
+  fi
+
+  if command -v wget &>/dev/null; then
+    wget -q "$jq_url" -O "$jq_bin" && chmod +x "$jq_bin" \
+      && ok "jq downloaded to ${jq_bin}" \
+      && export PATH="$(dirname "$jq_bin"):${PATH}" && return
+  fi
+
+  die "curl and wget not found. Install jq manually: https://jqlang.github.io/jq/download/"
 }
 
 check_deps() {
   # Auto-install jq if missing
   if ! command -v jq &>/dev/null; then
     install_jq
-    # Re-check after install
-    command -v jq &>/dev/null || die "jq installation failed. Install manually: https://jqlang.github.io/jq/download/"
+    command -v jq &>/dev/null || die "jq install failed. Install manually: https://jqlang.github.io/jq/download/"
   fi
 
-  command -v aws &>/dev/null || die "aws cli not found. Install: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
+  command -v aws &>/dev/null \
+    || die "aws cli not found. Install: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
 
   ok "All dependencies satisfied (aws cli, jq)"
 }

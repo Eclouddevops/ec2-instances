@@ -12,7 +12,7 @@
 #
 # Requirements:
 #   - aws cli v2
-#   - jq
+#   - jq  (auto-installed if missing)
 #   - ssh / sftp (for ssh/sftp modes)
 #   - aws session-manager-plugin (for ssm mode)
 #     Install: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
@@ -30,6 +30,9 @@ KEY_FILE="${HOME}/sftp-ubuntu.pem"
 VPC_ID="vpc-0c58ac931eaffb988"
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Global: holds full path to jq binary (set by check_deps)
+JQ_BIN="jq"
+
 # Colours
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -45,84 +48,107 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 die()     { error "$*"; exit 1; }
 section() { echo -e "\n${CYAN}━━━ $* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
-# ── Dependency checks & auto-install ─────────────────────────────────────────
+# ── jq auto-install ───────────────────────────────────────────────────────────
 install_jq() {
   warn "jq not found. Attempting auto-install..."
 
-  local arch
-  arch=$(uname -m)
-  local jq_url
+  # Detect OS and architecture
+  local os_type arch jq_url
+  os_type=$(uname -s 2>/dev/null || echo "unknown")
+  arch=$(uname -m 2>/dev/null || echo "x86_64")
 
-  case "$arch" in
-    x86_64)          jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64" ;;
-    aarch64|arm64)   jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64" ;;
-    *)               die "Unsupported architecture: ${arch}. Install jq manually: https://jqlang.github.io/jq/download/" ;;
-  esac
+  # Detect Git Bash / MSYS2 / Cygwin on Windows via HOME path like /c/Users/...
+  local is_windows=false
+  if echo "${os_type}" | grep -qiE "MINGW|MSYS|CYGWIN"; then
+    is_windows=true
+  elif echo "${HOME}" | grep -qE '^/[a-zA-Z]/'; then
+    is_windows=true
+  fi
 
-  # Try package managers WITHOUT sudo first (root env or sudo-less)
+  if [[ "$is_windows" == "true" ]]; then
+    jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-windows-amd64.exe"
+  else
+    case "$arch" in
+      x86_64)            jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64" ;;
+      aarch64|arm64)     jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64" ;;
+      *)                 die "Unsupported arch: ${arch}. Install jq manually: https://jqlang.github.io/jq/download/" ;;
+    esac
+  fi
+
+  # Try package managers first (works when running as root, no sudo needed)
   if command -v apt-get &>/dev/null; then
     apt-get update -y -qq 2>/dev/null && apt-get install -y -qq jq 2>/dev/null \
-      && ok "jq installed via apt-get" && return
+      && ok "jq installed via apt-get" && JQ_BIN="jq" && return
   fi
-
   if command -v yum &>/dev/null; then
     yum install -y -q jq 2>/dev/null \
-      && ok "jq installed via yum" && return
+      && ok "jq installed via yum" && JQ_BIN="jq" && return
   fi
-
   if command -v dnf &>/dev/null; then
     dnf install -y -q jq 2>/dev/null \
-      && ok "jq installed via dnf" && return
+      && ok "jq installed via dnf" && JQ_BIN="jq" && return
   fi
-
   if command -v brew &>/dev/null; then
-    brew install jq 2>/dev/null \
-      && ok "jq installed via brew" && return
+    brew install jq \
+      && ok "jq installed via brew" && JQ_BIN="jq" && return
   fi
 
-  # Download static binary to a user-writable location (no sudo needed)
+  # ── Download static binary without sudo ──────────────────────────────────
   warn "Downloading jq static binary (no sudo required)..."
 
-  # Pick first writable bin dir, or fall back to ~/bin
-  local jq_bin=""
-  local try_dirs=("${HOME}/bin" "${HOME}/.local/bin" "/tmp")
-  for d in "${try_dirs[@]}"; do
-    mkdir -p "$d" 2>/dev/null || continue
-    if touch "${d}/.jq_test" 2>/dev/null; then
-      rm -f "${d}/.jq_test"
-      jq_bin="${d}/jq"
+  # Find a writable directory
+  local dest_dir=""
+  for d in "${HOME}/bin" "${HOME}/.local/bin" "${HOME}" "/tmp"; do
+    mkdir -p "$d" 2>/dev/null || true
+    if touch "${d}/.jq_write_test" 2>/dev/null; then
+      rm -f "${d}/.jq_write_test"
+      dest_dir="$d"
       break
     fi
   done
+  [[ -z "$dest_dir" ]] && die "No writable dir found. Install jq manually: https://jqlang.github.io/jq/download/"
 
-  [[ -z "$jq_bin" ]] && die "Cannot find a writable directory for jq. Install manually: https://jqlang.github.io/jq/download/"
+  # Use .exe on Windows/Git Bash
+  local jq_dest
+  if [[ "$is_windows" == "true" ]]; then
+    jq_dest="${dest_dir}/jq.exe"
+  else
+    jq_dest="${dest_dir}/jq"
+  fi
 
+  # Download
   if command -v curl &>/dev/null; then
-    curl -fsSL "$jq_url" -o "$jq_bin" && chmod +x "$jq_bin" \
-      && ok "jq downloaded to ${jq_bin}" \
-      && export PATH="$(dirname "$jq_bin"):${PATH}" && return
+    curl -fsSL "$jq_url" -o "$jq_dest" || die "curl download failed for ${jq_url}"
+  elif command -v wget &>/dev/null; then
+    wget -q "$jq_url" -O "$jq_dest" || die "wget download failed for ${jq_url}"
+  else
+    die "Neither curl nor wget found. Install jq manually: https://jqlang.github.io/jq/download/"
   fi
 
-  if command -v wget &>/dev/null; then
-    wget -q "$jq_url" -O "$jq_bin" && chmod +x "$jq_bin" \
-      && ok "jq downloaded to ${jq_bin}" \
-      && export PATH="$(dirname "$jq_bin"):${PATH}" && return
-  fi
+  chmod +x "$jq_dest"
+  ok "jq downloaded to ${jq_dest}"
 
-  die "curl and wget not found. Install jq manually: https://jqlang.github.io/jq/download/"
+  # Store full path in JQ_BIN — used throughout the script instead of bare 'jq'
+  # This avoids PATH cache issues where command -v still fails after export
+  JQ_BIN="$jq_dest"
+  export PATH="${dest_dir}:${PATH}"
 }
 
 check_deps() {
-  # Auto-install jq if missing
-  if ! command -v jq &>/dev/null; then
+  if command -v jq &>/dev/null; then
+    JQ_BIN="jq"
+  else
     install_jq
-    command -v jq &>/dev/null || die "jq install failed. Install manually: https://jqlang.github.io/jq/download/"
+    # Verify using full path (bypasses shell PATH cache)
+    "$JQ_BIN" --version &>/dev/null \
+      || die "jq install failed. Install manually: https://jqlang.github.io/jq/download/"
+    ok "jq ready at: ${JQ_BIN}"
   fi
 
   command -v aws &>/dev/null \
     || die "aws cli not found. Install: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
 
-  ok "All dependencies satisfied (aws cli, jq)"
+  ok "All dependencies satisfied"
 }
 
 # ── AWS helpers ───────────────────────────────────────────────────────────────
@@ -178,7 +204,6 @@ get_key() {
   log "Secret ID : ${SECRET_ID}"
   log "Key file  : ${KEY_FILE}"
 
-  # Remove old read-only copy if it exists
   [[ -f "$KEY_FILE" ]] && { log "Removing old key file..."; rm -f "$KEY_FILE"; }
 
   local secret
@@ -187,8 +212,9 @@ get_key() {
     --query SecretString \
     --output text) || die "Failed to retrieve secret '${SECRET_ID}'. Check permissions."
 
-  echo "$secret" | jq -r '.private_key' > "$KEY_FILE" \
-    || die "Failed to parse private_key from secret. Is jq installed?"
+  # Use JQ_BIN (full path) in case PATH was just updated
+  echo "$secret" | "$JQ_BIN" -r '.private_key' > "$KEY_FILE" \
+    || die "Failed to parse private_key from secret."
 
   chmod 400 "$KEY_FILE"
   ok "Key saved to ${KEY_FILE} (chmod 400)"
@@ -210,11 +236,7 @@ connect_ssh() {
   [[ "$eice_state" == "create-complete" ]] \
     || die "EICE is not ready (state: ${eice_state}). Run 'terraform apply' or use './connect.sh ssm' instead."
 
-  # Fetch key if missing or not read-only
-  if [[ ! -f "$KEY_FILE" ]]; then
-    warn "Key file not found. Retrieving from Secrets Manager..."
-    get_key
-  fi
+  [[ ! -f "$KEY_FILE" ]] && { warn "Key file not found. Retrieving..."; get_key; }
 
   ok "Connecting to ${SSH_USER}@${private_ip} via EICE tunnel..."
   echo ""
@@ -246,10 +268,7 @@ connect_sftp() {
   [[ "$eice_state" == "create-complete" ]] \
     || die "EICE is not ready (state: ${eice_state}). Run 'terraform apply' first."
 
-  if [[ ! -f "$KEY_FILE" ]]; then
-    warn "Key file not found. Retrieving from Secrets Manager..."
-    get_key
-  fi
+  [[ ! -f "$KEY_FILE" ]] && { warn "Key file not found. Retrieving..."; get_key; }
 
   ok "Opening SFTP to ${SSH_USER}@${private_ip} via EICE tunnel..."
   echo ""
@@ -268,7 +287,7 @@ connect_ssm() {
   section "SSM Session Manager"
 
   command -v session-manager-plugin &>/dev/null \
-    || warn "session-manager-plugin not found. Install it: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+    || warn "session-manager-plugin not found. Install: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
 
   local instance_id ssm_state
   instance_id=$(get_instance_id)
@@ -278,7 +297,7 @@ connect_ssm() {
   log "SSM status  : ${ssm_state}"
 
   [[ "$ssm_state" == "Online" ]] \
-    || { warn "SSM agent status: ${ssm_state}. Instance may still be booting. Attempting connection anyway..."; }
+    || warn "SSM agent status: ${ssm_state}. Instance may still be booting. Trying anyway..."
 
   ok "Starting SSM session for ${instance_id}..."
   echo ""
@@ -333,7 +352,6 @@ show_status() {
   printf "  %-25s %s\n" "Key File:"        "${KEY_FILE}"
   echo ""
 
-  # Connectivity summary
   echo -e "  Connection Methods:"
   if [[ "$ssm_state" == "Online" ]]; then
     echo -e "    ${GREEN}✔${NC} SSM Session Manager  → ./connect.sh ssm"

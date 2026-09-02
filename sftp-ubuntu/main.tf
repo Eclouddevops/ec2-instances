@@ -27,6 +27,9 @@ locals {
   ami_id = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu_22_04.id
 }
 
+# Current AWS account ID (used in IAM policy ARNs)
+data "aws_caller_identity" "current" {}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # SSH Key Pair  (TLS-generated, stored in Secrets Manager)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -341,6 +344,18 @@ resource "aws_iam_role_policy" "sftp_secrets_access" {
           "ec2:DescribeTags"
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "AllowEICEOpenTunnel"
+        Effect = "Allow"
+        Action = [
+          "ec2-instance-connect:OpenTunnel",
+          "ec2-instance-connect:SendSSHPublicKey"
+        ]
+        Resource = [
+          "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${aws_instance.sftp_ubuntu.id}",
+          "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance-connect-endpoint/${aws_ec2_instance_connect_endpoint.sftp_eice.id}"
+        ]
       }
     ]
   })
@@ -352,6 +367,57 @@ resource "aws_iam_instance_profile" "sftp_instance_profile" {
 
   tags = {
     Name = var.iam_instance_profile
+  }
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IAM Policy for CLI users – allows ec2-instance-connect:OpenTunnel
+# Attach this policy to any IAM user/role that needs to SSH via EICE
+# (e.g. OrganizationAccountAccessRole used from your laptop)
+# ──────────────────────────────────────────────────────────────────────────────
+
+resource "aws_iam_policy" "eice_open_tunnel_policy" {
+  name        = "${var.instance_name}-eice-open-tunnel-policy"
+  description = "Allows OpenTunnel via EICE to ${var.instance_name} instance"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowEICEOpenTunnel"
+        Effect = "Allow"
+        Action = [
+          "ec2-instance-connect:OpenTunnel"
+        ]
+        Resource = "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance-connect-endpoint/${aws_ec2_instance_connect_endpoint.sftp_eice.id}"
+      },
+      {
+        Sid    = "AllowSendSSHPublicKey"
+        Effect = "Allow"
+        Action = [
+          "ec2-instance-connect:SendSSHPublicKey"
+        ]
+        Resource = "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${aws_instance.sftp_ubuntu.id}"
+        Condition = {
+          StringEquals = {
+            "ec2:osuser" = "ubuntu"
+          }
+        }
+      },
+      {
+        Sid    = "AllowDescribeEICE"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceConnectEndpoints"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.instance_name}-eice-open-tunnel-policy"
   }
 }
 

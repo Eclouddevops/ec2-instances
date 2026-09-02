@@ -1,0 +1,34 @@
+# Terraform state files – never commit these
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform plan output
+*.tfplan
+tfplan
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Override files – local overrides
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform CLI config
+.terraformrc
+terraform.rc
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Sensitive variable files – use environment variables or Vault in production
+*.auto.tfvars
+secrets.tfvars
+
+# Private key files
+*.pem
+*.key

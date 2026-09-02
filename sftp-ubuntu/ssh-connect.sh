@@ -190,7 +190,41 @@ open_ssh() {
   log "Key        : ${KEY_FILE}"
   log "Connection : Direct (public subnet)"
   echo ""
-  ok  "Opening SSH session... (type 'exit' to disconnect)"
+
+  # ── Wait for SSH port 22 to be open ─────────────────────────────────────
+  log "Checking SSH port 22 on ${ELASTIC_IP}..."
+  local max_wait=180  # seconds
+  local waited=0
+  local interval=10
+
+  while true; do
+    # Try TCP connect to port 22 (works on Linux/macOS/Git Bash)
+    if command -v nc &>/dev/null; then
+      nc -z -w 3 "$ELASTIC_IP" 22 2>/dev/null && break
+    elif command -v bash &>/dev/null; then
+      # Pure bash TCP check (fallback when nc not available)
+      (echo >/dev/tcp/"$ELASTIC_IP"/22) 2>/dev/null && break
+    else
+      # Last resort: try ssh with ConnectTimeout
+      ssh -i "$KEY_FILE" \
+        -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=3 \
+        -o BatchMode=yes \
+        "${SSH_USER}@${ELASTIC_IP}" exit 2>/dev/null && break
+    fi
+
+    if (( waited >= max_wait )); then
+      die "SSH port 22 not open after ${max_wait}s.\nCheck:\n  1. Security group allows port 22 inbound\n  2. Instance has finished booting (check EC2 console)\n  3. User data (openssh-server install) completed"
+    fi
+
+    warn "SSH not ready yet (${waited}s elapsed) – retrying in ${interval}s..."
+    sleep "$interval"
+    (( waited += interval ))
+  done
+
+  ok "SSH port 22 is open on ${ELASTIC_IP}"
+  echo ""
+  ok "Opening SSH session... (type 'exit' to disconnect)"
   echo ""
 
   ssh -i "$KEY_FILE" \

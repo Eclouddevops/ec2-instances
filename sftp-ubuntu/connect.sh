@@ -45,12 +45,65 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 die()     { error "$*"; exit 1; }
 section() { echo -e "\n${CYAN}━━━ $* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
-# ── Dependency checks ─────────────────────────────────────────────────────────
+# ── Dependency checks & auto-install ─────────────────────────────────────────
+install_jq() {
+  warn "jq not found. Attempting auto-install..."
+
+  if command -v apt-get &>/dev/null; then
+    sudo apt-get update -y -qq && sudo apt-get install -y -qq jq \
+      && ok "jq installed via apt-get" && return
+  fi
+
+  if command -v yum &>/dev/null; then
+    sudo yum install -y -q jq \
+      && ok "jq installed via yum" && return
+  fi
+
+  if command -v dnf &>/dev/null; then
+    sudo dnf install -y -q jq \
+      && ok "jq installed via dnf" && return
+  fi
+
+  if command -v brew &>/dev/null; then
+    brew install jq \
+      && ok "jq installed via brew" && return
+  fi
+
+  # Fallback: download static binary directly
+  warn "No package manager found. Downloading jq static binary..."
+  local jq_bin="/usr/local/bin/jq"
+  local arch
+  arch=$(uname -m)
+  local jq_url
+
+  case "$arch" in
+    x86_64)  jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64" ;;
+    aarch64) jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64" ;;
+    *)       die "Unsupported architecture: ${arch}. Please install jq manually: https://jqlang.github.io/jq/download/" ;;
+  esac
+
+  if command -v curl &>/dev/null; then
+    sudo curl -fsSL "$jq_url" -o "$jq_bin" && sudo chmod +x "$jq_bin" \
+      && ok "jq downloaded to ${jq_bin}" && return
+  elif command -v wget &>/dev/null; then
+    sudo wget -q "$jq_url" -O "$jq_bin" && sudo chmod +x "$jq_bin" \
+      && ok "jq downloaded to ${jq_bin}" && return
+  fi
+
+  die "Could not install jq automatically. Please install it manually:\n  https://jqlang.github.io/jq/download/"
+}
+
 check_deps() {
-  local missing=()
-  command -v aws  &>/dev/null || missing+=("aws cli")
-  command -v jq   &>/dev/null || missing+=("jq")
-  [[ ${#missing[@]} -eq 0 ]] || die "Missing required tools: ${missing[*]}"
+  # Auto-install jq if missing
+  if ! command -v jq &>/dev/null; then
+    install_jq
+    # Re-check after install
+    command -v jq &>/dev/null || die "jq installation failed. Install manually: https://jqlang.github.io/jq/download/"
+  fi
+
+  command -v aws &>/dev/null || die "aws cli not found. Install: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
+
+  ok "All dependencies satisfied (aws cli, jq)"
 }
 
 # ── AWS helpers ───────────────────────────────────────────────────────────────

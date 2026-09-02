@@ -354,3 +354,32 @@ resource "aws_iam_instance_profile" "sftp_instance_profile" {
     Name = var.iam_instance_profile
   }
 }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Elastic IP – permanent static public IP
+#
+# NOTE: The instance is in a private subnet (no IGW route), so the EIP is
+# allocated and associated but inbound internet traffic will NOT reach it
+# unless your VPC has a NAT Gateway or the subnet has a route to an IGW.
+# The EIP is permanent – it stays allocated even if the instance is stopped
+# or replaced, ensuring the public IP never changes.
+# ──────────────────────────────────────────────────────────────────────────────
+
+resource "aws_eip" "sftp_eip" {
+  domain = "vpc"
+
+  tags = {
+    Name = "${var.instance_name}-eip"
+    Role = "sftp-server"
+  }
+
+  lifecycle {
+    # Prevent EIP from being destroyed and re-created (would change the IP)
+    prevent_destroy = true
+  }
+}
+
+resource "aws_eip_association" "sftp_eip_assoc" {
+  instance_id   = aws_instance.sftp_ubuntu.id
+  allocation_id = aws_eip.sftp_eip.id
+}

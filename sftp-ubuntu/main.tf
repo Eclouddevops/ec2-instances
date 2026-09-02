@@ -111,6 +111,7 @@ resource "aws_instance" "sftp_ubuntu" {
   key_name                    = aws_key_pair.sftp_key_pair.key_name
   vpc_security_group_ids      = [aws_security_group.sftp_sg.id]
   associate_public_ip_address = true
+  iam_instance_profile        = aws_iam_instance_profile.sftp_instance_profile.name
 
   # Root EBS volume – 100 GB gp3
   root_block_device {
@@ -154,6 +155,82 @@ resource "aws_instance" "sftp_ubuntu" {
       # Ignore user_data changes after initial creation to avoid replacement
       user_data,
     ]
+  }
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IAM Role + Instance Profile  (full EC2 + Secrets Manager access)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Trust policy – allows EC2 service to assume this role
+data "aws_iam_policy_document" "ec2_assume_role" {
+  statement {
+    sid     = "AllowEC2AssumeRole"
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+# IAM Role
+resource "aws_iam_role" "sftp_ec2_role" {
+  name               = var.iam_role_name
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
+  description        = "IAM role for ${var.instance_name} EC2 instance – full AWS access"
+
+  tags = {
+    Name = var.iam_role_name
+  }
+}
+
+# Attach AWS-managed AdministratorAccess policy (full access)
+resource "aws_iam_role_policy_attachment" "sftp_admin_access" {
+  role       = aws_iam_role.sftp_ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+# Inline policy: explicit Secrets Manager access for the SSH key secret
+resource "aws_iam_role_policy" "sftp_secrets_access" {
+  name = "${var.iam_role_name}-secrets-policy"
+  role = aws_iam_role.sftp_ec2_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SecretsManagerSSHKey"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:ListSecretVersionIds"
+        ]
+        Resource = aws_secretsmanager_secret.sftp_ssh_private_key.arn
+      },
+      {
+        Sid    = "EC2DescribeSelf"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeTags"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# EC2 Instance Profile – wraps the role so it can be attached to the instance
+resource "aws_iam_instance_profile" "sftp_instance_profile" {
+  name = var.iam_instance_profile
+  role = aws_iam_role.sftp_ec2_role.name
+
+  tags = {
+    Name = var.iam_instance_profile
   }
 }
 

@@ -56,3 +56,25 @@ output "retrieve_key_command" {
   description = "AWS CLI command to retrieve the SSH private key from Secrets Manager"
   value       = "aws secretsmanager get-secret-value --secret-id ${aws_secretsmanager_secret.sftp_ssh_private_key.name} --profile CoreProdWorkloadAccount --region ap-south-1 --query SecretString --output text | jq -r '.private_key' > sftp-ubuntu.pem && chmod 400 sftp-ubuntu.pem"
 }
+
+# ── IAM Outputs ───────────────────────────────────────────────────────────────
+
+output "iam_role_name" {
+  description = "Name of the IAM role attached to the SFTP EC2 instance"
+  value       = aws_iam_role.sftp_ec2_role.name
+}
+
+output "iam_role_arn" {
+  description = "ARN of the IAM role attached to the SFTP EC2 instance"
+  value       = aws_iam_role.sftp_ec2_role.arn
+}
+
+output "iam_instance_profile_name" {
+  description = "Name of the IAM instance profile attached to the SFTP EC2 instance"
+  value       = aws_iam_instance_profile.sftp_instance_profile.name
+}
+
+output "iam_instance_profile_arn" {
+  description = "ARN of the IAM instance profile attached to the SFTP EC2 instance"
+  value       = aws_iam_instance_profile.sftp_instance_profile.arn
+}

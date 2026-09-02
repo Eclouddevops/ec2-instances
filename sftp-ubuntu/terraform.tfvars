@@ -21,17 +21,18 @@ root_volume_iops       = 3000
 root_volume_throughput = 125
 root_volume_encrypted  = true
 
-# ── REQUIRED: fill in your VPC and public subnet IDs ─────────────────────────
-# Run the following to list your VPCs and subnets in Mumbai:
-#   aws ec2 describe-vpcs --region ap-south-1 --profile CoreProdWorkloadAccount
-#   aws ec2 describe-subnets --region ap-south-1 --profile CoreProdWorkloadAccount
-vpc_id    = "vpc-xxxxxxxxxxxxxxxxx" # TODO: replace with your VPC ID
-subnet_id = "subnet-xxxxxxxxxxxxxxxxx" # TODO: replace with a public subnet ID
+# ── VPC and Subnet ────────────────────────────────────────────────────────────
+vpc_id    = "vpc-0c58ac931eaffb988"    # TimesPro_VPC
+subnet_id = "subnet-01a994d75450a2350" # TimesPro_PrivateSubnet_2
 
 # Networking – restrict these CIDRs to your trusted IP ranges in production
-allowed_ssh_cidrs  = ["0.0.0.0/0"] # TODO: restrict to your IP/CIDR for security
-allowed_sftp_cidrs = ["0.0.0.0/0"] # TODO: restrict to your IP/CIDR for security
+allowed_ssh_cidrs  = ["0.0.0.0/0"]
+allowed_sftp_cidrs = ["0.0.0.0/0"]
 
 # Secrets Manager
 secret_name            = "sftp-ubuntu/ssh-private-key"
 secret_recovery_window = 7
+
+# IAM Role
+iam_role_name        = "sftp-ubuntu-ec2-role"
+iam_instance_profile = "sftp-ubuntu-ec2-instance-profile"

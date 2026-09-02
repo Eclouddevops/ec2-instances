@@ -111,3 +111,17 @@ variable "secret_recovery_window" {
   type        = number
   default     = 7
 }
+
+# ── IAM ───────────────────────────────────────────────────────────────────────
+
+variable "iam_role_name" {
+  description = "Name of the IAM role attached to the SFTP EC2 instance"
+  type        = string
+  default     = "sftp-ubuntu-ec2-role"
+}
+
+variable "iam_instance_profile" {
+  description = "Name of the IAM instance profile attached to the SFTP EC2 instance"
+  type        = string
+  default     = "sftp-ubuntu-ec2-instance-profile"
+}

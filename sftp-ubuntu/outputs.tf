@@ -107,3 +107,25 @@ output "ec2messages_endpoint_id" {
   description = "ID of the EC2 Messages VPC interface endpoint"
   value       = aws_vpc_endpoint.ec2messages.id
 }
+
+# ── Elastic IP Outputs ────────────────────────────────────────────────────────
+
+output "elastic_public_ip" {
+  description = "Permanent Elastic IP (public) assigned to the SFTP instance"
+  value       = aws_eip.sftp_eip.public_ip
+}
+
+output "elastic_ip_id" {
+  description = "Allocation ID of the Elastic IP"
+  value       = aws_eip.sftp_eip.id
+}
+
+output "elastic_ip_association_id" {
+  description = "Association ID linking the EIP to the EC2 instance"
+  value       = aws_eip_association.sftp_eip_assoc.id
+}
+
+output "ssh_via_eip_command" {
+  description = "SSH command using the Elastic IP (requires public route to instance)"
+  value       = "ssh -i sftp-ubuntu.pem -o StrictHostKeyChecking=no ubuntu@${aws_eip.sftp_eip.public_ip}"
+}

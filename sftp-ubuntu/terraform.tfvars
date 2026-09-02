@@ -23,8 +23,8 @@ root_volume_encrypted  = true
 
 # ── VPC and Subnet ────────────────────────────────────────────────────────────
 vpc_id    = "vpc-0c58ac931eaffb988"    # TimesPro_VPC
-vpc_cidr  = "10.0.0.0/8"              # TODO: replace with actual VPC CIDR if different
-subnet_id = "subnet-01a994d75450a2350" # TimesPro_PrivateSubnet_2
+vpc_cidr  = "10.19.0.0/16"            # TimesPro_VPC CIDR
+subnet_id = "subnet-05731234ce71b3a5f" # TimesPro_PublicSubnet_1 (ap-south-1a) – PUBLIC
 
 # Networking
 allowed_ssh_cidrs  = ["0.0.0.0/0"]

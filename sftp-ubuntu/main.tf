@@ -80,17 +80,16 @@ resource "aws_security_group" "sftp_sg" {
   description = "Security group for SFTP/SSH access to ${var.instance_name}"
   vpc_id      = var.vpc_id
 
-  # SSH inbound – source is the EC2 Instance Connect Endpoint SG
-  # allowing traffic from eice_sg ensures only the EICE tunnel can reach port 22
+  # SSH inbound – allow from internet (public subnet instance)
   ingress {
-    description     = "SSH via EC2 Instance Connect Endpoint"
-    from_port       = 22
-    to_port         = 22
-    protocol        = "tcp"
-    security_groups = [aws_security_group.eice_sg.id]
+    description = "SSH and SFTP access from internet"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_ssh_cidrs
   }
 
-  # All outbound traffic (needed for apt-get, SSM agent, etc.)
+  # All outbound traffic
   egress {
     description = "Allow all outbound traffic"
     from_port   = 0
@@ -221,7 +220,7 @@ resource "aws_instance" "sftp_ubuntu" {
   subnet_id                   = var.subnet_id
   key_name                    = aws_key_pair.sftp_key_pair.key_name
   vpc_security_group_ids      = [aws_security_group.sftp_sg.id]
-  associate_public_ip_address = false # private subnet – no public IP
+  associate_public_ip_address = true  # public subnet – assign public IP
   iam_instance_profile        = aws_iam_instance_profile.sftp_instance_profile.name
 
   # Root EBS volume – 100 GB gp3

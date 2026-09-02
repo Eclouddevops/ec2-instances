@@ -23,11 +23,16 @@ root_volume_encrypted  = true
 
 # ── VPC and Subnet ────────────────────────────────────────────────────────────
 vpc_id    = "vpc-0c58ac931eaffb988"    # TimesPro_VPC
+vpc_cidr  = "10.0.0.0/8"              # TODO: replace with actual VPC CIDR if different
 subnet_id = "subnet-01a994d75450a2350" # TimesPro_PrivateSubnet_2
 
-# Networking – restrict these CIDRs to your trusted IP ranges in production
+# Networking
 allowed_ssh_cidrs  = ["0.0.0.0/0"]
 allowed_sftp_cidrs = ["0.0.0.0/0"]
+
+# EC2 Instance Connect Endpoint
+# preserve_client_ip = false means traffic appears to come from within the VPC
+eice_preserve_client_ip = false
 
 # Secrets Manager
 secret_name            = "sftp-ubuntu/ssh-private-key"

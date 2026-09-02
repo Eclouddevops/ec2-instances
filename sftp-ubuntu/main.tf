@@ -69,7 +69,7 @@ resource "aws_secretsmanager_secret_version" "sftp_ssh_private_key_value" {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Security Group
+# Security Group – SSH inbound (used by EC2 Instance Connect Endpoint tunnel)
 # ──────────────────────────────────────────────────────────────────────────────
 
 resource "aws_security_group" "sftp_sg" {
@@ -77,16 +77,17 @@ resource "aws_security_group" "sftp_sg" {
   description = "Security group for SFTP/SSH access to ${var.instance_name}"
   vpc_id      = var.vpc_id
 
-  # SSH inbound
+  # SSH inbound – source is the EC2 Instance Connect Endpoint SG
+  # allowing traffic from eice_sg ensures only the EICE tunnel can reach port 22
   ingress {
-    description = "SSH access"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.allowed_ssh_cidrs
+    description     = "SSH via EC2 Instance Connect Endpoint"
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    security_groups = [aws_security_group.eice_sg.id]
   }
 
-  # All outbound traffic
+  # All outbound traffic (needed for apt-get, SSM agent, etc.)
   egress {
     description = "Allow all outbound traffic"
     from_port   = 0
@@ -100,8 +101,115 @@ resource "aws_security_group" "sftp_sg" {
   }
 }
 
+# Security Group for EC2 Instance Connect Endpoint itself
+resource "aws_security_group" "eice_sg" {
+  name        = "${var.instance_name}-eice-sg"
+  description = "Security group for EC2 Instance Connect Endpoint"
+  vpc_id      = var.vpc_id
+
+  # No inbound rules needed on the endpoint SG
+  # Outbound: allow SSH to the instance SG on port 22
+  egress {
+    description = "Allow SSH to SFTP instance"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.instance_name}-eice-sg"
+  }
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EC2 Instance Connect Endpoint (EICE)
+# Allows SSH into a private-subnet instance with NO bastion, NO public IP
+# ──────────────────────────────────────────────────────────────────────────────
+
+resource "aws_ec2_instance_connect_endpoint" "sftp_eice" {
+  subnet_id          = var.subnet_id
+  security_group_ids = [aws_security_group.eice_sg.id]
+  preserve_client_ip = var.eice_preserve_client_ip
+
+  tags = {
+    Name = "${var.instance_name}-eice"
+  }
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SSM VPC Endpoints (allow SSM Session Manager without NAT Gateway)
+# Three endpoints are required: ssm, ssmmessages, ec2messages
+# ──────────────────────────────────────────────────────────────────────────────
+
+resource "aws_security_group" "ssm_endpoint_sg" {
+  name        = "${var.instance_name}-ssm-endpoint-sg"
+  description = "Security group for SSM VPC interface endpoints"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description = "HTTPS from VPC CIDR for SSM endpoints"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    description = "Allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.instance_name}-ssm-endpoint-sg"
+  }
+}
+
+resource "aws_vpc_endpoint" "ssm" {
+  vpc_id              = var.vpc_id
+  service_name        = "com.amazonaws.${var.aws_region}.ssm"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [var.subnet_id]
+  security_group_ids  = [aws_security_group.ssm_endpoint_sg.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "${var.instance_name}-ssm-endpoint"
+  }
+}
+
+resource "aws_vpc_endpoint" "ssmmessages" {
+  vpc_id              = var.vpc_id
+  service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [var.subnet_id]
+  security_group_ids  = [aws_security_group.ssm_endpoint_sg.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "${var.instance_name}-ssmmessages-endpoint"
+  }
+}
+
+resource "aws_vpc_endpoint" "ec2messages" {
+  vpc_id              = var.vpc_id
+  service_name        = "com.amazonaws.${var.aws_region}.ec2messages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [var.subnet_id]
+  security_group_ids  = [aws_security_group.ssm_endpoint_sg.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "${var.instance_name}-ec2messages-endpoint"
+  }
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # EC2 Instance
+# NOTE: Private subnet – no public IP. Access via EICE or SSM Session Manager.
 # ──────────────────────────────────────────────────────────────────────────────
 
 resource "aws_instance" "sftp_ubuntu" {
@@ -110,7 +218,7 @@ resource "aws_instance" "sftp_ubuntu" {
   subnet_id                   = var.subnet_id
   key_name                    = aws_key_pair.sftp_key_pair.key_name
   vpc_security_group_ids      = [aws_security_group.sftp_sg.id]
-  associate_public_ip_address = true
+  associate_public_ip_address = false # private subnet – no public IP
   iam_instance_profile        = aws_iam_instance_profile.sftp_instance_profile.name
 
   # Root EBS volume – 100 GB gp3
@@ -127,12 +235,17 @@ resource "aws_instance" "sftp_ubuntu" {
     }
   }
 
-  # User data – install OpenSSH server and enable SFTP subsystem
+  # User data – install OpenSSH server, SSM agent and enable SFTP subsystem
   user_data = <<-EOF
     #!/bin/bash
     set -e
     apt-get update -y
     apt-get install -y openssh-server
+
+    # Install SSM Agent (Ubuntu 22.04)
+    snap install amazon-ssm-agent --classic || true
+    systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+    systemctl start  snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
     # Ensure SFTP subsystem is configured
     if ! grep -q "^Subsystem sftp" /etc/ssh/sshd_config; then
@@ -150,19 +263,23 @@ resource "aws_instance" "sftp_ubuntu" {
 
   lifecycle {
     ignore_changes = [
-      # Ignore AMI changes after initial creation
       ami,
-      # Ignore user_data changes after initial creation to avoid replacement
       user_data,
     ]
   }
+
+  depends_on = [
+    aws_vpc_endpoint.ssm,
+    aws_vpc_endpoint.ssmmessages,
+    aws_vpc_endpoint.ec2messages,
+  ]
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# IAM Role + Instance Profile  (full EC2 + Secrets Manager access)
+# IAM Role + Instance Profile
+# AdministratorAccess + SSM managed policy for Session Manager
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Trust policy – allows EC2 service to assume this role
 data "aws_iam_policy_document" "ec2_assume_role" {
   statement {
     sid     = "AllowEC2AssumeRole"
@@ -176,7 +293,6 @@ data "aws_iam_policy_document" "ec2_assume_role" {
   }
 }
 
-# IAM Role
 resource "aws_iam_role" "sftp_ec2_role" {
   name               = var.iam_role_name
   assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
@@ -187,13 +303,19 @@ resource "aws_iam_role" "sftp_ec2_role" {
   }
 }
 
-# Attach AWS-managed AdministratorAccess policy (full access)
+# Full AWS access
 resource "aws_iam_role_policy_attachment" "sftp_admin_access" {
   role       = aws_iam_role.sftp_ec2_role.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
-# Inline policy: explicit Secrets Manager access for the SSH key secret
+# SSM Session Manager (required even with AdministratorAccess for SSM agent registration)
+resource "aws_iam_role_policy_attachment" "sftp_ssm_access" {
+  role       = aws_iam_role.sftp_ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# Inline policy: Secrets Manager access for the SSH key secret
 resource "aws_iam_role_policy" "sftp_secrets_access" {
   name = "${var.iam_role_name}-secrets-policy"
   role = aws_iam_role.sftp_ec2_role.id
@@ -224,7 +346,6 @@ resource "aws_iam_role_policy" "sftp_secrets_access" {
   })
 }
 
-# EC2 Instance Profile – wraps the role so it can be attached to the instance
 resource "aws_iam_instance_profile" "sftp_instance_profile" {
   name = var.iam_instance_profile
   role = aws_iam_role.sftp_ec2_role.name
@@ -232,19 +353,4 @@ resource "aws_iam_instance_profile" "sftp_instance_profile" {
   tags = {
     Name = var.iam_instance_profile
   }
-}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Elastic IP  (static public IP for external access)
-# ──────────────────────────────────────────────────────────────────────────────
-
-resource "aws_eip" "sftp_eip" {
-  instance = aws_instance.sftp_ubuntu.id
-  domain   = "vpc"
-
-  tags = {
-    Name = "${var.instance_name}-eip"
-  }
-
-  depends_on = [aws_instance.sftp_ubuntu]
 }

@@ -37,7 +37,7 @@ variable "instance_type" {
 }
 
 variable "ami_id" {
-  description = "Ubuntu 22.04 LTS AMI ID for ap-south-1. Leave empty to use the latest Ubuntu 22.04 LTS AMI (data source lookup)."
+  description = "Ubuntu 22.04 LTS AMI ID for ap-south-1. Leave empty to auto-select latest Ubuntu 22.04 LTS AMI."
   type        = string
   default     = ""
 }
@@ -81,13 +81,19 @@ variable "vpc_id" {
   type        = string
 }
 
+variable "vpc_cidr" {
+  description = "CIDR block of the VPC (used for SSM endpoint security group ingress)"
+  type        = string
+  default     = "10.0.0.0/8"
+}
+
 variable "subnet_id" {
-  description = "Public subnet ID for the SFTP instance"
+  description = "Private subnet ID for the SFTP instance (EC2 Instance Connect Endpoint will also be placed here)"
   type        = string
 }
 
 variable "allowed_ssh_cidrs" {
-  description = "List of CIDR blocks allowed to SSH (port 22) into the instance"
+  description = "List of CIDR blocks allowed to SSH (port 22) into the instance (used as fallback reference; actual access is via EICE)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
@@ -96,6 +102,14 @@ variable "allowed_sftp_cidrs" {
   description = "List of CIDR blocks allowed to connect via SFTP (port 22)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
+}
+
+# ── EC2 Instance Connect Endpoint ─────────────────────────────────────────────
+
+variable "eice_preserve_client_ip" {
+  description = "Whether the EC2 Instance Connect Endpoint preserves the client IP. Set to false for private connectivity."
+  type        = bool
+  default     = false
 }
 
 # ── Secrets Manager ───────────────────────────────────────────────────────────

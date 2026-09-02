@@ -180,7 +180,7 @@ data "aws_iam_policy_document" "ec2_assume_role" {
 resource "aws_iam_role" "sftp_ec2_role" {
   name               = var.iam_role_name
   assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
-  description        = "IAM role for ${var.instance_name} EC2 instance – full AWS access"
+  description        = "IAM role for ${var.instance_name} EC2 instance - full AWS access"
 
   tags = {
     Name = var.iam_role_name

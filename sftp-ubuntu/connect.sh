@@ -6,16 +6,11 @@
 #   ./connect.sh              # auto-detect best method and connect
 #   ./connect.sh ssh          # SSH via EC2 Instance Connect Endpoint (EICE)
 #   ./connect.sh sftp         # SFTP via EC2 Instance Connect Endpoint (EICE)
-#   ./connect.sh ssm          # SSM Session Manager (no key needed)
-#   ./connect.sh status       # show instance + EICE + SSM endpoint status
-#   ./connect.sh get-key      # retrieve SSH key from Secrets Manager only
+#   ./connect.sh ssm          # SSM Session Manager (portable, no admin needed)
+#   ./connect.sh status       # show instance + EICE + SSM status
+#   ./connect.sh get-key      # retrieve & print SSH key + ready-to-run command
 #
-# Requirements:
-#   - aws cli v2
-#   - jq  (auto-installed if missing)
-#   - ssh / sftp (for ssh/sftp modes)
-#   - aws session-manager-plugin (for ssm mode)
-#     Install: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
+# NO admin/sudo required – all tools downloaded as portable binaries to ~/bin/
 # ==============================================================================
 
 set -euo pipefail
@@ -30,8 +25,14 @@ KEY_FILE="${HOME}/sftp-ubuntu.pem"
 VPC_ID="vpc-0c58ac931eaffb988"
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Global: holds full path to jq binary (set by check_deps)
+# Portable bin dir – no admin needed, lives entirely in home directory
+PORTABLE_BIN="${HOME}/bin"
+mkdir -p "$PORTABLE_BIN"
+export PATH="${PORTABLE_BIN}:${PATH}"
+
+# Global binary references (set by setup functions)
 JQ_BIN="jq"
+SSM_PLUGIN_BIN="session-manager-plugin"
 
 # Colours
 RED='\033[0;31m'
@@ -39,7 +40,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Colour
+BOLD='\033[1m'
+NC='\033[0m'
 
 log()     { echo -e "${BLUE}[INFO]${NC}  $*"; }
 ok()      { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -48,114 +50,178 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 die()     { error "$*"; exit 1; }
 section() { echo -e "\n${CYAN}━━━ $* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
-# ── jq auto-install ───────────────────────────────────────────────────────────
-install_jq() {
-  warn "jq not found. Attempting auto-install..."
+# ── Platform detection ────────────────────────────────────────────────────────
+detect_platform() {
+  OS_TYPE=$(uname -s 2>/dev/null || echo "Linux")
+  ARCH=$(uname -m 2>/dev/null || echo "x86_64")
+  IS_WINDOWS=false
 
-  # Detect OS and architecture
-  local os_type arch jq_url
-  os_type=$(uname -s 2>/dev/null || echo "unknown")
-  arch=$(uname -m 2>/dev/null || echo "x86_64")
-
-  # Detect Git Bash / MSYS2 / Cygwin on Windows via HOME path like /c/Users/...
-  local is_windows=false
-  if echo "${os_type}" | grep -qiE "MINGW|MSYS|CYGWIN"; then
-    is_windows=true
+  if echo "${OS_TYPE}" | grep -qiE "MINGW|MSYS|CYGWIN"; then
+    IS_WINDOWS=true
   elif echo "${HOME}" | grep -qE '^/[a-zA-Z]/'; then
-    is_windows=true
+    IS_WINDOWS=true
   fi
+}
 
-  if [[ "$is_windows" == "true" ]]; then
-    jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-windows-amd64.exe"
-  else
-    case "$arch" in
-      x86_64)            jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64" ;;
-      aarch64|arm64)     jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64" ;;
-      *)                 die "Unsupported arch: ${arch}. Install jq manually: https://jqlang.github.io/jq/download/" ;;
-    esac
-  fi
-
-  # Try package managers first (works when running as root, no sudo needed)
-  if command -v apt-get &>/dev/null; then
-    apt-get update -y -qq 2>/dev/null && apt-get install -y -qq jq 2>/dev/null \
-      && ok "jq installed via apt-get" && JQ_BIN="jq" && return
-  fi
-  if command -v yum &>/dev/null; then
-    yum install -y -q jq 2>/dev/null \
-      && ok "jq installed via yum" && JQ_BIN="jq" && return
-  fi
-  if command -v dnf &>/dev/null; then
-    dnf install -y -q jq 2>/dev/null \
-      && ok "jq installed via dnf" && JQ_BIN="jq" && return
-  fi
-  if command -v brew &>/dev/null; then
-    brew install jq \
-      && ok "jq installed via brew" && JQ_BIN="jq" && return
-  fi
-
-  # ── Download static binary without sudo ──────────────────────────────────
-  warn "Downloading jq static binary (no sudo required)..."
-
-  # Find a writable directory
-  local dest_dir=""
-  for d in "${HOME}/bin" "${HOME}/.local/bin" "${HOME}" "/tmp"; do
-    mkdir -p "$d" 2>/dev/null || true
-    if touch "${d}/.jq_write_test" 2>/dev/null; then
-      rm -f "${d}/.jq_write_test"
-      dest_dir="$d"
-      break
-    fi
-  done
-  [[ -z "$dest_dir" ]] && die "No writable dir found. Install jq manually: https://jqlang.github.io/jq/download/"
-
-  # Use .exe on Windows/Git Bash
-  local jq_dest
-  if [[ "$is_windows" == "true" ]]; then
-    jq_dest="${dest_dir}/jq.exe"
-  else
-    jq_dest="${dest_dir}/jq"
-  fi
-
-  # Download
+# ── Download helper ───────────────────────────────────────────────────────────
+download() {
+  local url="$1" dest="$2"
   if command -v curl &>/dev/null; then
-    curl -fsSL "$jq_url" -o "$jq_dest" || die "curl download failed for ${jq_url}"
+    curl -fsSL "$url" -o "$dest"
   elif command -v wget &>/dev/null; then
-    wget -q "$jq_url" -O "$jq_dest" || die "wget download failed for ${jq_url}"
+    wget -q "$url" -O "$dest"
   else
-    die "Neither curl nor wget found. Install jq manually: https://jqlang.github.io/jq/download/"
+    die "Neither curl nor wget found. Cannot download ${url}"
   fi
-
-  chmod +x "$jq_dest"
-  ok "jq downloaded to ${jq_dest}"
-
-  # Store full path in JQ_BIN — used throughout the script instead of bare 'jq'
-  # This avoids PATH cache issues where command -v still fails after export
-  JQ_BIN="$jq_dest"
-  export PATH="${dest_dir}:${PATH}"
 }
 
-check_deps() {
+# ── jq setup (portable, no admin) ────────────────────────────────────────────
+setup_jq() {
+  # Already available?
   if command -v jq &>/dev/null; then
-    JQ_BIN="jq"
-  else
-    install_jq
-    # Verify using full path (bypasses shell PATH cache)
-    "$JQ_BIN" --version &>/dev/null \
-      || die "jq install failed. Install manually: https://jqlang.github.io/jq/download/"
-    ok "jq ready at: ${JQ_BIN}"
+    JQ_BIN="jq"; return
+  fi
+  if [[ -x "${PORTABLE_BIN}/jq" ]] || [[ -x "${PORTABLE_BIN}/jq.exe" ]]; then
+    JQ_BIN="${PORTABLE_BIN}/jq$( [[ "$IS_WINDOWS" == "true" ]] && echo '.exe' || echo '' )"
+    "$JQ_BIN" --version &>/dev/null && return
   fi
 
-  command -v aws &>/dev/null \
-    || die "aws cli not found. Install: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
+  warn "jq not found – downloading portable binary to ${PORTABLE_BIN}/ ..."
 
-  ok "All dependencies satisfied"
+  local jq_url jq_dest
+  if [[ "$IS_WINDOWS" == "true" ]]; then
+    jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-windows-amd64.exe"
+    jq_dest="${PORTABLE_BIN}/jq.exe"
+  else
+    case "$ARCH" in
+      x86_64)        jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64" ;;
+      aarch64|arm64) jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64" ;;
+      *) die "Unsupported arch: ${ARCH}. Install jq manually: https://jqlang.github.io/jq/download/" ;;
+    esac
+    jq_dest="${PORTABLE_BIN}/jq"
+  fi
+
+  download "$jq_url" "$jq_dest"
+  chmod +x "$jq_dest"
+  JQ_BIN="$jq_dest"
+  "$JQ_BIN" --version &>/dev/null || die "jq download failed. Try manually: https://jqlang.github.io/jq/download/"
+  ok "jq portable binary ready: ${JQ_BIN}"
 }
 
-# ── AWS helpers ───────────────────────────────────────────────────────────────
+# ── SSM Session Manager Plugin (portable, NO admin/install needed) ────────────
+setup_ssm_plugin() {
+  # Check standard PATH first
+  if command -v session-manager-plugin &>/dev/null; then
+    SSM_PLUGIN_BIN="session-manager-plugin"; return
+  fi
+
+  # Check portable bin dir
+  local portable_plugin
+  if [[ "$IS_WINDOWS" == "true" ]]; then
+    portable_plugin="${PORTABLE_BIN}/session-manager-plugin.exe"
+    # Also check default Windows install path (if installed by someone else)
+    local win_path="/c/Program Files/Amazon/SessionManagerPlugin/bin/session-manager-plugin.exe"
+    if [[ -f "$win_path" ]]; then
+      SSM_PLUGIN_BIN="$win_path"; return
+    fi
+  else
+    portable_plugin="${PORTABLE_BIN}/session-manager-plugin"
+  fi
+
+  if [[ -x "$portable_plugin" ]]; then
+    SSM_PLUGIN_BIN="$portable_plugin"; return
+  fi
+
+  warn "session-manager-plugin not found – downloading portable binary (no admin needed)..."
+
+  # AWS provides a standalone binary for Windows (no installer version)
+  # For Linux, extract the binary directly from the .deb package
+  if [[ "$IS_WINDOWS" == "true" ]]; then
+    # AWS does not publish a standalone .exe — but the installer .exe itself
+    # can be run with /S (silent) flag from a writable dir if admin is available.
+    # Since admin is NOT available, we use the ZIP package instead.
+    local zip_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPlugin.zip"
+    local zip_dest="${PORTABLE_BIN}/SessionManagerPlugin.zip"
+
+    log "Downloading portable SSM plugin zip..."
+    download "$zip_url" "$zip_dest"
+
+    # Unzip using PowerShell (available on all Windows without admin)
+    powershell.exe -NoProfile -Command \
+      "Expand-Archive -Force -Path '$(cygpath -w "$zip_dest")' -DestinationPath '$(cygpath -w "$PORTABLE_BIN")'" \
+      2>/dev/null || unzip -oq "$zip_dest" -d "$PORTABLE_BIN" 2>/dev/null \
+      || die "Could not extract SSM plugin zip. Try: unzip ${zip_dest} -d ${PORTABLE_BIN}"
+
+    rm -f "$zip_dest"
+
+    # The zip extracts to bin/session-manager-plugin.exe
+    local extracted
+    extracted=$(find "$PORTABLE_BIN" -name "session-manager-plugin.exe" 2>/dev/null | head -1)
+    if [[ -n "$extracted" ]]; then
+      mv "$extracted" "${PORTABLE_BIN}/session-manager-plugin.exe" 2>/dev/null || true
+      SSM_PLUGIN_BIN="${PORTABLE_BIN}/session-manager-plugin.exe"
+      ok "SSM plugin portable binary ready: ${SSM_PLUGIN_BIN}"
+      return
+    fi
+    die "Could not find session-manager-plugin.exe after extraction. Check ${PORTABLE_BIN}/"
+
+  else
+    # Linux: download and extract binary from .deb without dpkg/root
+    local deb_url deb_dest
+    case "$ARCH" in
+      x86_64)        deb_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" ;;
+      aarch64|arm64) deb_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_arm64/session-manager-plugin.deb" ;;
+      *) die "Unsupported arch: ${ARCH}" ;;
+    esac
+    deb_dest="/tmp/session-manager-plugin.deb"
+    local extract_dir="/tmp/ssm-plugin-extract"
+
+    log "Downloading SSM plugin .deb..."
+    download "$deb_url" "$deb_dest"
+
+    mkdir -p "$extract_dir"
+    # Extract .deb without dpkg (ar + tar, available everywhere)
+    if command -v ar &>/dev/null; then
+      ar x "$deb_dest" --output="$extract_dir" 2>/dev/null || \
+        (cd "$extract_dir" && ar x "$deb_dest")
+      # deb contains data.tar.xz or data.tar.gz
+      local data_tar
+      data_tar=$(find "$extract_dir" -name "data.tar*" | head -1)
+      if [[ -n "$data_tar" ]]; then
+        tar -xf "$data_tar" -C "$extract_dir" 2>/dev/null || true
+      fi
+    fi
+
+    local extracted_bin
+    extracted_bin=$(find "$extract_dir" -name "session-manager-plugin" -type f 2>/dev/null | head -1)
+
+    if [[ -n "$extracted_bin" ]]; then
+      cp "$extracted_bin" "${PORTABLE_BIN}/session-manager-plugin"
+      chmod +x "${PORTABLE_BIN}/session-manager-plugin"
+      rm -rf "$extract_dir" "$deb_dest"
+      SSM_PLUGIN_BIN="${PORTABLE_BIN}/session-manager-plugin"
+      ok "SSM plugin portable binary ready: ${SSM_PLUGIN_BIN}"
+      return
+    fi
+
+    # Fallback: install via dpkg if available (may need root but try anyway)
+    if command -v dpkg &>/dev/null; then
+      dpkg -i "$deb_dest" 2>/dev/null \
+        && SSM_PLUGIN_BIN="session-manager-plugin" \
+        && ok "SSM plugin installed via dpkg" \
+        && rm -f "$deb_dest" && return
+    fi
+
+    die "Could not extract SSM plugin binary. Please report this issue."
+  fi
+}
+
+# ── AWS wrapper ───────────────────────────────────────────────────────────────
 aws_cmd() {
   aws --region "$REGION" --profile "$PROFILE" "$@"
 }
 
+# ── Instance lookup helpers ───────────────────────────────────────────────────
 get_instance_id() {
   local id
   id=$(aws_cmd ec2 describe-instances \
@@ -163,22 +229,21 @@ get_instance_id() {
               "Name=instance-state-name,Values=running,stopped,pending" \
     --query "Reservations[0].Instances[0].InstanceId" \
     --output text 2>/dev/null)
-  [[ "$id" == "None" || -z "$id" ]] && die "Instance '${INSTANCE_NAME}' not found in ${REGION}. Is it running?"
+  [[ "$id" == "None" || -z "$id" ]] && \
+    die "Instance '${INSTANCE_NAME}' not found in ${REGION}. Is it running?"
   echo "$id"
 }
 
 get_private_ip() {
-  local instance_id="$1"
   aws_cmd ec2 describe-instances \
-    --instance-ids "$instance_id" \
+    --instance-ids "$1" \
     --query "Reservations[0].Instances[0].PrivateIpAddress" \
     --output text
 }
 
 get_instance_state() {
-  local instance_id="$1"
   aws_cmd ec2 describe-instances \
-    --instance-ids "$instance_id" \
+    --instance-ids "$1" \
     --query "Reservations[0].Instances[0].State.Name" \
     --output text
 }
@@ -187,40 +252,67 @@ get_eice_state() {
   aws_cmd ec2 describe-instance-connect-endpoints \
     --filters "Name=vpc-id,Values=${VPC_ID}" \
     --query "InstanceConnectEndpoints[0].State" \
-    --output text 2>/dev/null || echo "none"
+    --output text 2>/dev/null || echo "None"
 }
 
 get_ssm_state() {
-  local instance_id="$1"
   aws_cmd ssm describe-instance-information \
-    --filters "Key=InstanceIds,Values=${instance_id}" \
+    --filters "Key=InstanceIds,Values=${1}" \
     --query "InstanceInformationList[0].PingStatus" \
-    --output text 2>/dev/null || echo "none"
+    --output text 2>/dev/null || echo "None"
 }
 
-# ── Retrieve SSH key from Secrets Manager ─────────────────────────────────────
+# ── SSH key: retrieve, save and print decrypted ready-to-run command ──────────
 get_key() {
-  section "Retrieving SSH Key from Secrets Manager"
-  log "Secret ID : ${SECRET_ID}"
-  log "Key file  : ${KEY_FILE}"
+  section "SSH Key – Secrets Manager"
+  log "Secret  : ${SECRET_ID}"
+  log "Saved to: ${KEY_FILE}"
 
-  [[ -f "$KEY_FILE" ]] && { log "Removing old key file..."; rm -f "$KEY_FILE"; }
+  # Always remove old read-only file first to avoid chmod 400 lock
+  [[ -f "$KEY_FILE" ]] && rm -f "$KEY_FILE"
 
   local secret
   secret=$(aws_cmd secretsmanager get-secret-value \
     --secret-id "$SECRET_ID" \
     --query SecretString \
-    --output text) || die "Failed to retrieve secret '${SECRET_ID}'. Check permissions."
+    --output text) || die "Cannot retrieve secret '${SECRET_ID}'. Check IAM permissions."
 
-  # Use JQ_BIN (full path) in case PATH was just updated
+  # Write plain (decrypted) PEM key – no passphrase, no encryption
   echo "$secret" | "$JQ_BIN" -r '.private_key' > "$KEY_FILE" \
-    || die "Failed to parse private_key from secret."
+    || die "Failed to parse private_key from secret JSON."
 
   chmod 400 "$KEY_FILE"
-  ok "Key saved to ${KEY_FILE} (chmod 400)"
+  ok "Key saved (chmod 400): ${KEY_FILE}"
+
+  # ── Print the decrypted private key content directly in terminal ───────────
+  local instance_id private_ip
+  instance_id=$(get_instance_id)
+  private_ip=$(get_private_ip "$instance_id")
+
+  echo ""
+  echo -e "${CYAN}━━━ Decrypted SSH Private Key ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "${YELLOW}(Copy & save this as sftp-ubuntu.pem if needed on another machine)${NC}"
+  echo ""
+  cat "$KEY_FILE"
+  echo ""
+  echo -e "${CYAN}━━━ Ready-to-Run SSH Command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo ""
+  echo -e "  ${BOLD}SSH (via EICE tunnel):${NC}"
+  echo -e "  ${GREEN}ssh -i ${KEY_FILE} -o StrictHostKeyChecking=no \\"
+  echo -e "    -o ProxyCommand=\"aws ec2-instance-connect open-tunnel --instance-id ${instance_id} --region ${REGION} --profile ${PROFILE}\" \\"
+  echo -e "    ${SSH_USER}@${private_ip}${NC}"
+  echo ""
+  echo -e "  ${BOLD}SFTP (via EICE tunnel):${NC}"
+  echo -e "  ${GREEN}sftp -i ${KEY_FILE} -o StrictHostKeyChecking=no \\"
+  echo -e "    -o ProxyCommand=\"aws ec2-instance-connect open-tunnel --instance-id ${instance_id} --region ${REGION} --profile ${PROFILE}\" \\"
+  echo -e "    ${SSH_USER}@${private_ip}${NC}"
+  echo ""
+  echo -e "  ${BOLD}SSM (no key needed):${NC}"
+  echo -e "  ${GREEN}aws ssm start-session --target ${instance_id} --region ${REGION} --profile ${PROFILE}${NC}"
+  echo ""
 }
 
-# ── SSH via EC2 Instance Connect Endpoint ─────────────────────────────────────
+# ── SSH via EICE ──────────────────────────────────────────────────────────────
 connect_ssh() {
   section "SSH via EC2 Instance Connect Endpoint"
 
@@ -234,25 +326,21 @@ connect_ssh() {
   log "EICE state  : ${eice_state}"
 
   [[ "$eice_state" == "create-complete" ]] \
-    || die "EICE is not ready (state: ${eice_state}). Run 'terraform apply' or use './connect.sh ssm' instead."
+    || die "EICE not ready (state: ${eice_state}). Run './connect.sh ssm' instead."
 
-  [[ ! -f "$KEY_FILE" ]] && { warn "Key file not found. Retrieving..."; get_key; }
+  [[ ! -f "$KEY_FILE" ]] && { warn "Key not found – retrieving..."; get_key; }
 
-  ok "Connecting to ${SSH_USER}@${private_ip} via EICE tunnel..."
+  ok "Connecting ${SSH_USER}@${private_ip} via EICE..."
   echo ""
-
   ssh -i "$KEY_FILE" \
     -o StrictHostKeyChecking=no \
     -o ServerAliveInterval=60 \
     -o ServerAliveCountMax=3 \
-    -o ProxyCommand="aws ec2-instance-connect open-tunnel \
-      --instance-id ${instance_id} \
-      --region ${REGION} \
-      --profile ${PROFILE}" \
+    -o ProxyCommand="aws ec2-instance-connect open-tunnel --instance-id ${instance_id} --region ${REGION} --profile ${PROFILE}" \
     "${SSH_USER}@${private_ip}"
 }
 
-# ── SFTP via EC2 Instance Connect Endpoint ────────────────────────────────────
+# ── SFTP via EICE ─────────────────────────────────────────────────────────────
 connect_sftp() {
   section "SFTP via EC2 Instance Connect Endpoint"
 
@@ -266,145 +354,27 @@ connect_sftp() {
   log "EICE state  : ${eice_state}"
 
   [[ "$eice_state" == "create-complete" ]] \
-    || die "EICE is not ready (state: ${eice_state}). Run 'terraform apply' first."
+    || die "EICE not ready (state: ${eice_state}). Run 'terraform apply' first."
 
-  [[ ! -f "$KEY_FILE" ]] && { warn "Key file not found. Retrieving..."; get_key; }
+  [[ ! -f "$KEY_FILE" ]] && { warn "Key not found – retrieving..."; get_key; }
 
-  ok "Opening SFTP to ${SSH_USER}@${private_ip} via EICE tunnel..."
+  ok "Opening SFTP ${SSH_USER}@${private_ip} via EICE..."
   echo ""
-
   sftp -i "$KEY_FILE" \
     -o StrictHostKeyChecking=no \
-    -o ProxyCommand="aws ec2-instance-connect open-tunnel \
-      --instance-id ${instance_id} \
-      --region ${REGION} \
-      --profile ${PROFILE}" \
+    -o ProxyCommand="aws ec2-instance-connect open-tunnel --instance-id ${instance_id} --region ${REGION} --profile ${PROFILE}" \
     "${SSH_USER}@${private_ip}"
 }
 
-# ── SSM Session Manager ───────────────────────────────────────────────────────
-install_ssm_plugin() {
-  warn "session-manager-plugin not found. Attempting auto-install..."
-
-  local os_type arch is_windows
-  os_type=$(uname -s 2>/dev/null || echo "unknown")
-  arch=$(uname -m 2>/dev/null || echo "x86_64")
-  is_windows=false
-
-  if echo "${os_type}" | grep -qiE "MINGW|MSYS|CYGWIN"; then
-    is_windows=true
-  elif echo "${HOME}" | grep -qE '^/[a-zA-Z]/'; then
-    is_windows=true
-  fi
-
-  # ── Windows / Git Bash ────────────────────────────────────────────────────
-  if [[ "$is_windows" == "true" ]]; then
-    # Check common install location first (plugin may already be installed
-    # but not on PATH in this Git Bash session)
-    local win_plugin_path="/c/Program Files/Amazon/SessionManagerPlugin/bin/session-manager-plugin"
-    if [[ -f "${win_plugin_path}" ]]; then
-      export PATH="/c/Program Files/Amazon/SessionManagerPlugin/bin:${PATH}"
-      ok "session-manager-plugin found at ${win_plugin_path}. Added to PATH."
-      return
-    fi
-
-    local installer_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe"
-    local installer_path="${HOME}/SessionManagerPluginSetup.exe"
-
-    log "Downloading SessionManagerPlugin installer..."
-    if command -v curl &>/dev/null; then
-      curl -fsSL "$installer_url" -o "$installer_path" \
-        || die "Failed to download SSM plugin installer."
-    elif command -v wget &>/dev/null; then
-      wget -q "$installer_url" -O "$installer_path" \
-        || die "Failed to download SSM plugin installer."
-    else
-      die "Neither curl nor wget found."
-    fi
-
-    ok "Installer downloaded to: ${installer_path}"
-    echo ""
-    warn "ACTION REQUIRED – Install the plugin using ONE of these methods:"
-    echo ""
-    echo -e "  ${CYAN}Option 1${NC} – Run the downloaded installer (double-click in Explorer):"
-    echo    "    $(echo $installer_path | sed 's|/c/|C:\\|;s|/|\\|g')"
-    echo ""
-    echo -e "  ${CYAN}Option 2${NC} – winget (run in PowerShell or CMD):"
-    echo    "    winget install Amazon.SessionManagerPlugin"
-    echo ""
-    echo -e "  ${CYAN}Option 3${NC} – Run from Git Bash:"
-    echo    "    ${installer_path}"
-    echo ""
-    warn "After installing, open a NEW Git Bash window and re-run: sh connect.sh"
-    echo ""
-    die "Plugin not installed yet. Complete the steps above first."
-  fi
-
-  # ── Linux ─────────────────────────────────────────────────────────────────
-  local pkg_url pkg_file
-  case "$arch" in
-    x86_64)
-      pkg_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
-      pkg_file="/tmp/session-manager-plugin.deb"
-      ;;
-    aarch64|arm64)
-      pkg_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_arm64/session-manager-plugin.deb"
-      pkg_file="/tmp/session-manager-plugin.deb"
-      ;;
-    *)
-      die "Unsupported arch ${arch}. Install manually: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
-      ;;
-  esac
-
-  # Try apt-get (Ubuntu/Debian) — works without sudo when root
-  if command -v apt-get &>/dev/null; then
-    log "Downloading session-manager-plugin .deb..."
-    if command -v curl &>/dev/null; then
-      curl -fsSL "$pkg_url" -o "$pkg_file"
-    else
-      wget -q "$pkg_url" -O "$pkg_file"
-    fi
-    dpkg -i "$pkg_file" 2>/dev/null \
-      && ok "session-manager-plugin installed via dpkg" \
-      && rm -f "$pkg_file" && return
-  fi
-
-  # Try yum/rpm (Amazon Linux / RHEL)
-  if command -v yum &>/dev/null; then
-    local rpm_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/linux_64bit/session-manager-plugin.rpm"
-    local rpm_file="/tmp/session-manager-plugin.rpm"
-    log "Downloading session-manager-plugin .rpm..."
-    if command -v curl &>/dev/null; then
-      curl -fsSL "$rpm_url" -o "$rpm_file"
-    else
-      wget -q "$rpm_url" -O "$rpm_file"
-    fi
-    yum install -y "$rpm_file" 2>/dev/null \
-      && ok "session-manager-plugin installed via yum" \
-      && rm -f "$rpm_file" && return
-  fi
-
-  die "Could not auto-install session-manager-plugin.\nInstall manually: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
-}
-
+# ── SSM Session Manager (portable plugin, no admin) ───────────────────────────
 connect_ssm() {
   section "SSM Session Manager"
 
-  # On Windows/Git Bash: add the default plugin install path to PATH first
-  # so we find it even if the user opened a new shell after installing
-  local win_plugin_dir="/c/Program Files/Amazon/SessionManagerPlugin/bin"
-  if [[ -d "$win_plugin_dir" ]]; then
-    export PATH="${win_plugin_dir}:${PATH}"
-  fi
+  setup_ssm_plugin
 
-  # Auto-install plugin if still not found
-  if ! command -v session-manager-plugin &>/dev/null; then
-    install_ssm_plugin
-    # Re-check after install attempt
-    command -v session-manager-plugin &>/dev/null \
-      || die "session-manager-plugin still not found after install attempt."
-  fi
-  ok "session-manager-plugin found"
+  # Ensure the portable binary is on PATH so aws cli can find it as a subprocess
+  export PATH="${PORTABLE_BIN}:$(dirname "$SSM_PLUGIN_BIN"):${PATH}"
+  ok "Using SSM plugin: ${SSM_PLUGIN_BIN}"
 
   local instance_id ssm_state
   instance_id=$(get_instance_id)
@@ -414,15 +384,14 @@ connect_ssm() {
   log "SSM status  : ${ssm_state}"
 
   [[ "$ssm_state" == "Online" ]] \
-    || warn "SSM agent status: ${ssm_state}. Instance may still be booting. Trying anyway..."
+    || warn "SSM agent status: ${ssm_state}. Trying anyway (may still be booting)..."
 
   ok "Starting SSM session for ${instance_id}..."
   echo ""
-
   aws_cmd ssm start-session --target "$instance_id"
 }
 
-# ── Auto-detect best method ───────────────────────────────────────────────────
+# ── Auto-detect ───────────────────────────────────────────────────────────────
 auto_connect() {
   section "Auto-detecting connection method"
 
@@ -436,17 +405,17 @@ auto_connect() {
   log "SSM status  : ${ssm_state}"
 
   if [[ "$ssm_state" == "Online" ]]; then
-    ok "SSM agent is Online. Connecting via SSM Session Manager..."
+    ok "SSM Online – connecting via SSM Session Manager (no key needed)..."
     connect_ssm
   elif [[ "$eice_state" == "create-complete" ]]; then
-    ok "EICE is ready. Connecting via EC2 Instance Connect Endpoint..."
+    ok "EICE ready – connecting via SSH..."
     connect_ssh
   else
-    die "No connection method available.\n  EICE state : ${eice_state}\n  SSM status : ${ssm_state}\n\nFix options:\n  1. Run 'terraform apply' to create EICE + SSM endpoints\n  2. Wait 2-3 mins for instance to boot and SSM agent to register"
+    die "No connection method available.\n  EICE: ${eice_state}  |  SSM: ${ssm_state}\n\nRun 'terraform apply' or wait 2-3 mins for the instance to boot."
   fi
 }
 
-# ── Status overview ───────────────────────────────────────────────────────────
+# ── Status ────────────────────────────────────────────────────────────────────
 show_status() {
   section "Instance & Connectivity Status"
 
@@ -458,29 +427,29 @@ show_status() {
   ssm_state=$(get_ssm_state "$instance_id")
 
   echo ""
-  printf "  %-25s %s\n" "Instance Name:"   "${INSTANCE_NAME}"
-  printf "  %-25s %s\n" "Instance ID:"     "${instance_id}"
-  printf "  %-25s %s\n" "Private IP:"      "${private_ip}"
-  printf "  %-25s %s\n" "Instance State:"  "${state}"
-  printf "  %-25s %s\n" "EICE State:"      "${eice_state}"
-  printf "  %-25s %s\n" "SSM Agent:"       "${ssm_state}"
-  printf "  %-25s %s\n" "Region:"          "${REGION}"
-  printf "  %-25s %s\n" "Profile:"         "${PROFILE}"
-  printf "  %-25s %s\n" "Key File:"        "${KEY_FILE}"
+  printf "  %-25s %s\n" "Instance Name:"  "${INSTANCE_NAME}"
+  printf "  %-25s %s\n" "Instance ID:"    "${instance_id}"
+  printf "  %-25s %s\n" "Private IP:"     "${private_ip}"
+  printf "  %-25s %s\n" "Instance State:" "${state}"
+  printf "  %-25s %s\n" "EICE State:"     "${eice_state}"
+  printf "  %-25s %s\n" "SSM Agent:"      "${ssm_state}"
+  printf "  %-25s %s\n" "Region:"         "${REGION}"
+  printf "  %-25s %s\n" "Profile:"        "${PROFILE}"
+  printf "  %-25s %s\n" "Key File:"       "${KEY_FILE}"
+  printf "  %-25s %s\n" "Portable Bin:"   "${PORTABLE_BIN}"
   echo ""
 
   echo -e "  Connection Methods:"
   if [[ "$ssm_state" == "Online" ]]; then
-    echo -e "    ${GREEN}✔${NC} SSM Session Manager  → ./connect.sh ssm"
+    echo -e "    ${GREEN}✔${NC} SSM Session Manager  → sh connect.sh ssm"
   else
     echo -e "    ${RED}✘${NC} SSM Session Manager  (agent: ${ssm_state})"
   fi
-
   if [[ "$eice_state" == "create-complete" ]]; then
-    echo -e "    ${GREEN}✔${NC} SSH via EICE          → ./connect.sh ssh"
-    echo -e "    ${GREEN}✔${NC} SFTP via EICE         → ./connect.sh sftp"
+    echo -e "    ${GREEN}✔${NC} SSH via EICE          → sh connect.sh ssh"
+    echo -e "    ${GREEN}✔${NC} SFTP via EICE         → sh connect.sh sftp"
   else
-    echo -e "    ${RED}✘${NC} SSH/SFTP via EICE     (EICE state: ${eice_state})"
+    echo -e "    ${RED}✘${NC} SSH/SFTP via EICE     (state: ${eice_state})"
   fi
   echo ""
 }
@@ -489,42 +458,37 @@ show_status() {
 usage() {
   cat <<EOF
 
-Usage: $(basename "$0") [command]
+Usage: sh connect.sh [command]
 
 Commands:
-  (none)      Auto-detect best method and connect (SSM preferred)
-  ssh         SSH into the instance via EC2 Instance Connect Endpoint
-  sftp        SFTP into the instance via EC2 Instance Connect Endpoint
-  ssm         Open a shell via SSM Session Manager (no SSH key needed)
-  status      Show instance state, EICE state, SSM agent status
-  get-key     Retrieve the SSH private key from Secrets Manager only
-  help        Show this help message
+  (none)    Auto-detect best method (SSM preferred, then EICE)
+  ssh       SSH via EC2 Instance Connect Endpoint (with key)
+  sftp      SFTP via EC2 Instance Connect Endpoint (with key)
+  ssm       SSM Session Manager shell (no key, no admin needed)
+  status    Show instance state, EICE state, SSM agent state
+  get-key   Retrieve key + print decrypted PEM + ready-to-run commands
+  help      Show this help
 
-Examples:
-  ./connect.sh             # auto-connect
-  ./connect.sh ssh         # SSH with key via EICE
-  ./connect.sh sftp        # SFTP with key via EICE
-  ./connect.sh ssm         # SSM shell (no key)
-  ./connect.sh status      # check what's available
-  ./connect.sh get-key     # download key to ~/sftp-ubuntu.pem
+All tools (jq, session-manager-plugin) are downloaded as portable
+binaries to ~/bin/ — no admin or sudo required.
 
 EOF
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
-  check_deps
+  detect_platform
+  setup_jq
 
   local cmd="${1:-auto}"
-
   case "$cmd" in
-    auto|"")  auto_connect  ;;
-    ssh)      connect_ssh   ;;
-    sftp)     connect_sftp  ;;
-    ssm)      connect_ssm   ;;
-    status)   show_status   ;;
-    get-key)  get_key       ;;
-    help|-h|--help) usage   ;;
+    auto|"")       auto_connect  ;;
+    ssh)           connect_ssh   ;;
+    sftp)          connect_sftp  ;;
+    ssm)           connect_ssm   ;;
+    status)        show_status   ;;
+    get-key)       get_key       ;;
+    help|-h|--help) usage        ;;
     *) error "Unknown command: ${cmd}"; usage; exit 1 ;;
   esac
 }

@@ -299,9 +299,19 @@ install_ssm_plugin() {
 
   # ── Windows / Git Bash ────────────────────────────────────────────────────
   if [[ "$is_windows" == "true" ]]; then
+    # Check common install location first (plugin may already be installed
+    # but not on PATH in this Git Bash session)
+    local win_plugin_path="/c/Program Files/Amazon/SessionManagerPlugin/bin/session-manager-plugin"
+    if [[ -f "${win_plugin_path}" ]]; then
+      export PATH="/c/Program Files/Amazon/SessionManagerPlugin/bin:${PATH}"
+      ok "session-manager-plugin found at ${win_plugin_path}. Added to PATH."
+      return
+    fi
+
     local installer_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe"
     local installer_path="${HOME}/SessionManagerPluginSetup.exe"
 
+    log "Downloading SessionManagerPlugin installer..."
     if command -v curl &>/dev/null; then
       curl -fsSL "$installer_url" -o "$installer_path" \
         || die "Failed to download SSM plugin installer."
@@ -312,11 +322,22 @@ install_ssm_plugin() {
       die "Neither curl nor wget found."
     fi
 
-    warn "Windows detected. Please run the installer manually:"
-    warn "  ${installer_path}"
-    warn "Or install via winget:  winget install Amazon.SessionManagerPlugin"
-    warn "Or via chocolatey:      choco install session-manager-plugin"
-    die "Re-run this script after installing the plugin."
+    ok "Installer downloaded to: ${installer_path}"
+    echo ""
+    warn "ACTION REQUIRED – Install the plugin using ONE of these methods:"
+    echo ""
+    echo -e "  ${CYAN}Option 1${NC} – Run the downloaded installer (double-click in Explorer):"
+    echo    "    $(echo $installer_path | sed 's|/c/|C:\\|;s|/|\\|g')"
+    echo ""
+    echo -e "  ${CYAN}Option 2${NC} – winget (run in PowerShell or CMD):"
+    echo    "    winget install Amazon.SessionManagerPlugin"
+    echo ""
+    echo -e "  ${CYAN}Option 3${NC} – Run from Git Bash:"
+    echo    "    ${installer_path}"
+    echo ""
+    warn "After installing, open a NEW Git Bash window and re-run: sh connect.sh"
+    echo ""
+    die "Plugin not installed yet. Complete the steps above first."
   fi
 
   # ── Linux ─────────────────────────────────────────────────────────────────
@@ -369,9 +390,17 @@ install_ssm_plugin() {
 connect_ssm() {
   section "SSM Session Manager"
 
-  # Auto-install plugin if missing
+  # On Windows/Git Bash: add the default plugin install path to PATH first
+  # so we find it even if the user opened a new shell after installing
+  local win_plugin_dir="/c/Program Files/Amazon/SessionManagerPlugin/bin"
+  if [[ -d "$win_plugin_dir" ]]; then
+    export PATH="${win_plugin_dir}:${PATH}"
+  fi
+
+  # Auto-install plugin if still not found
   if ! command -v session-manager-plugin &>/dev/null; then
     install_ssm_plugin
+    # Re-check after install attempt
     command -v session-manager-plugin &>/dev/null \
       || die "session-manager-plugin still not found after install attempt."
   fi

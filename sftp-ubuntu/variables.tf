@@ -88,7 +88,7 @@ variable "vpc_cidr" {
 }
 
 variable "subnet_id" {
-  description = "Private subnet ID for the SFTP instance (EC2 Instance Connect Endpoint will also be placed here)"
+  description = "Public subnet ID for the SFTP instance – must have MapPublicIpOnLaunch=true and a route to an IGW"
   type        = string
 }
 

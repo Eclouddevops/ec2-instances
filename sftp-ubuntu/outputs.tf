@@ -12,6 +12,11 @@ output "instance_private_ip" {
   value       = aws_instance.sftp_ubuntu.private_ip
 }
 
+output "instance_public_ip" {
+  description = "Auto-assigned public IP (changes on stop/start – use elastic_public_ip for permanent IP)"
+  value       = aws_instance.sftp_ubuntu.public_ip
+}
+
 output "security_group_id" {
   description = "ID of the security group attached to the SFTP instance"
   value       = aws_security_group.sftp_sg.id
@@ -55,18 +60,18 @@ output "retrieve_key_command" {
 }
 
 output "ssh_via_eice_command" {
-  description = "Step 2a – SSH via EC2 Instance Connect Endpoint (no bastion, no public IP needed)"
-  value       = "ssh -i sftp-ubuntu.pem -o ProxyCommand='aws ec2-instance-connect open-tunnel --instance-id ${aws_instance.sftp_ubuntu.id} --region ap-south-1 --profile CoreProdWorkloadAccount' ubuntu@${aws_instance.sftp_ubuntu.private_ip}"
+  description = "SSH via Elastic IP directly (public subnet – no tunnel needed)"
+  value       = "ssh -i sftp-ubuntu.pem -o StrictHostKeyChecking=no ubuntu@${aws_eip.sftp_eip.public_ip}"
 }
 
 output "ssm_session_command" {
-  description = "Step 2b – Open a shell via SSM Session Manager (no SSH key needed, requires SSM agent running)"
+  description = "SSM Session Manager shell (no SSH key needed)"
   value       = "aws ssm start-session --target ${aws_instance.sftp_ubuntu.id} --region ap-south-1 --profile CoreProdWorkloadAccount"
 }
 
 output "sftp_via_eice_command" {
-  description = "SFTP via EC2 Instance Connect Endpoint"
-  value       = "sftp -i sftp-ubuntu.pem -o ProxyCommand='aws ec2-instance-connect open-tunnel --instance-id ${aws_instance.sftp_ubuntu.id} --region ap-south-1 --profile CoreProdWorkloadAccount' ubuntu@${aws_instance.sftp_ubuntu.private_ip}"
+  description = "SFTP via Elastic IP directly (public subnet – no tunnel needed)"
+  value       = "sftp -i sftp-ubuntu.pem -o StrictHostKeyChecking=no ubuntu@${aws_eip.sftp_eip.public_ip}"
 }
 
 # ── IAM Outputs ───────────────────────────────────────────────────────────────

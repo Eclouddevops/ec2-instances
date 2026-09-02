@@ -129,3 +129,15 @@ output "ssh_via_eip_command" {
   description = "SSH command using the Elastic IP (requires public route to instance)"
   value       = "ssh -i sftp-ubuntu.pem -o StrictHostKeyChecking=no ubuntu@${aws_eip.sftp_eip.public_ip}"
 }
+
+# ── EICE Permission Fix ───────────────────────────────────────────────────────
+
+output "eice_policy_arn" {
+  description = "ARN of the IAM policy to attach to CLI users/roles needing EICE OpenTunnel access"
+  value       = aws_iam_policy.eice_open_tunnel_policy.arn
+}
+
+output "attach_eice_policy_command" {
+  description = "AWS CLI command to attach the EICE OpenTunnel policy to OrganizationAccountAccessRole"
+  value       = "aws iam attach-role-policy --role-name OrganizationAccountAccessRole --policy-arn ${aws_iam_policy.eice_open_tunnel_policy.arn} --region ${var.aws_region} --profile ${var.aws_profile}"
+}

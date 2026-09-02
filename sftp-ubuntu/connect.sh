@@ -283,11 +283,99 @@ connect_sftp() {
 }
 
 # ── SSM Session Manager ───────────────────────────────────────────────────────
+install_ssm_plugin() {
+  warn "session-manager-plugin not found. Attempting auto-install..."
+
+  local os_type arch is_windows
+  os_type=$(uname -s 2>/dev/null || echo "unknown")
+  arch=$(uname -m 2>/dev/null || echo "x86_64")
+  is_windows=false
+
+  if echo "${os_type}" | grep -qiE "MINGW|MSYS|CYGWIN"; then
+    is_windows=true
+  elif echo "${HOME}" | grep -qE '^/[a-zA-Z]/'; then
+    is_windows=true
+  fi
+
+  # ── Windows / Git Bash ────────────────────────────────────────────────────
+  if [[ "$is_windows" == "true" ]]; then
+    local installer_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe"
+    local installer_path="${HOME}/SessionManagerPluginSetup.exe"
+
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$installer_url" -o "$installer_path" \
+        || die "Failed to download SSM plugin installer."
+    elif command -v wget &>/dev/null; then
+      wget -q "$installer_url" -O "$installer_path" \
+        || die "Failed to download SSM plugin installer."
+    else
+      die "Neither curl nor wget found."
+    fi
+
+    warn "Windows detected. Please run the installer manually:"
+    warn "  ${installer_path}"
+    warn "Or install via winget:  winget install Amazon.SessionManagerPlugin"
+    warn "Or via chocolatey:      choco install session-manager-plugin"
+    die "Re-run this script after installing the plugin."
+  fi
+
+  # ── Linux ─────────────────────────────────────────────────────────────────
+  local pkg_url pkg_file
+  case "$arch" in
+    x86_64)
+      pkg_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+      pkg_file="/tmp/session-manager-plugin.deb"
+      ;;
+    aarch64|arm64)
+      pkg_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_arm64/session-manager-plugin.deb"
+      pkg_file="/tmp/session-manager-plugin.deb"
+      ;;
+    *)
+      die "Unsupported arch ${arch}. Install manually: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+      ;;
+  esac
+
+  # Try apt-get (Ubuntu/Debian) — works without sudo when root
+  if command -v apt-get &>/dev/null; then
+    log "Downloading session-manager-plugin .deb..."
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$pkg_url" -o "$pkg_file"
+    else
+      wget -q "$pkg_url" -O "$pkg_file"
+    fi
+    dpkg -i "$pkg_file" 2>/dev/null \
+      && ok "session-manager-plugin installed via dpkg" \
+      && rm -f "$pkg_file" && return
+  fi
+
+  # Try yum/rpm (Amazon Linux / RHEL)
+  if command -v yum &>/dev/null; then
+    local rpm_url="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/linux_64bit/session-manager-plugin.rpm"
+    local rpm_file="/tmp/session-manager-plugin.rpm"
+    log "Downloading session-manager-plugin .rpm..."
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$rpm_url" -o "$rpm_file"
+    else
+      wget -q "$rpm_url" -O "$rpm_file"
+    fi
+    yum install -y "$rpm_file" 2>/dev/null \
+      && ok "session-manager-plugin installed via yum" \
+      && rm -f "$rpm_file" && return
+  fi
+
+  die "Could not auto-install session-manager-plugin.\nInstall manually: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+}
+
 connect_ssm() {
   section "SSM Session Manager"
 
-  command -v session-manager-plugin &>/dev/null \
-    || warn "session-manager-plugin not found. Install: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+  # Auto-install plugin if missing
+  if ! command -v session-manager-plugin &>/dev/null; then
+    install_ssm_plugin
+    command -v session-manager-plugin &>/dev/null \
+      || die "session-manager-plugin still not found after install attempt."
+  fi
+  ok "session-manager-plugin found"
 
   local instance_id ssm_state
   instance_id=$(get_instance_id)
